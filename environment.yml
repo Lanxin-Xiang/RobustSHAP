@@ -1,0 +1,28 @@
+name: emotion-env
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - statsmodels
+  - ipykernel
+  - ipython
+  - jupyter_client
+  - jupyter_core
+  - notebook
+  - joblib
+  - tqdm
+  - numba
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - libstdcxx-ng[version='>=13']
+  - scipy
+prefix: /home/francesx/.conda/envs/emotion-env
