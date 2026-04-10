@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 
 def plot_zero_inflated_kde_with_hist(
     mix_df,
-    sample_id,
     feature,
+    sample_id=None,
     class_id=None,
     boot_results=None,
     shap_values=None,
@@ -24,24 +24,43 @@ def plot_zero_inflated_kde_with_hist(
 ):
     """Plot estimated zero-inflated KDE density and histogram for one group.
 
-    Selects one row from mix_df by (sample_id, feature[, class_id]) and overlays:
+    Works in two modes based on columns available in ``mix_df``:
+      - sample-feature level: selects by (sample_id, feature[, class_id])
+      - feature-level aggregation: selects by (feature[, class_id])
+
+    Overlays:
       1) histogram of non-zero SHAP values scaled by (1 - pi_zero),
       2) estimated continuous density from kde_model,
       3) optional point mass spike at 0.
     """
-    if class_id is not None:
-        sel = (
-            (mix_df["sample_id"] == sample_id)
-            & (mix_df["feature"] == feature)
-            & (mix_df["class_id"] == class_id)
-        )
-    else:
+    is_sample_level = "sample_id" in mix_df.columns
+
+    if feature is None:
+        raise ValueError("feature must be provided")
+
+    if "feature" not in mix_df.columns:
+        raise ValueError("mix_df must contain a 'feature' column")
+
+    if is_sample_level:
+        if sample_id is None:
+            raise ValueError("sample_id is required when mix_df contains sample_id")
         sel = (mix_df["sample_id"] == sample_id) & (mix_df["feature"] == feature)
+    else:
+        sel = mix_df["feature"] == feature
+
+    if class_id is not None:
+        if "class_id" not in mix_df.columns:
+            raise ValueError("class_id provided but class_id column not present in mix_df")
+        sel = sel & (mix_df["class_id"] == class_id)
 
     row_df = mix_df.loc[sel]
     if row_df.empty:
+        if is_sample_level:
+            raise ValueError(
+                f"No estimated density row for sample_id={sample_id}, feature={feature}, class_id={class_id}"
+            )
         raise ValueError(
-            f"No estimated density row for sample_id={sample_id}, feature={feature}, class_id={class_id}"
+            f"No estimated density row for feature={feature}, class_id={class_id}"
         )
     if len(row_df) > 1:
         row_df = row_df.head(1)
@@ -49,13 +68,20 @@ def plot_zero_inflated_kde_with_hist(
     row = row_df.iloc[0]
     model = row.get("kde_model", None)
     pi_zero = float(row.get("pi_zero", np.nan))
+    support = "real"
     if isinstance(model, dict):
         pi_zero = float(model.get("pi_zero", pi_zero))
         zero_tol = float(model.get("zero_tol", 0.0))
+        support = model.get("support", "real")
         kde = model.get("kde", None)
     else:
         zero_tol = 0.0
         kde = None
+
+    # Sample-feature estimates are always on real support.
+    # Positive support is reserved for feature-level aggregated mixtures.
+    if is_sample_level:
+        support = "real"
 
     if shap_values is None:
         if boot_results is None:
@@ -70,16 +96,37 @@ def plot_zero_inflated_kde_with_hist(
         else:
             raise TypeError(f"boot_results must be list[DataFrame] or DataFrame, got {type(boot_results)}")
 
-        raw_sel = (raw_df["sample_id"] == sample_id) & (raw_df["feature"] == feature)
+        if value_col not in raw_df.columns:
+            raise ValueError(f"{value_col} column not found in boot_results")
+
+        raw_sel = raw_df["feature"] == feature
         if class_id is not None:
             if "class_id" not in raw_df.columns:
                 raise ValueError("class_id provided but class_id column not present in boot_results")
             raw_sel = raw_sel & (raw_df["class_id"] == class_id)
 
-        if value_col not in raw_df.columns:
-            raise ValueError(f"{value_col} column not found in boot_results")
-
-        vals_all = raw_df.loc[raw_sel, value_col].to_numpy(dtype=float)
+        if is_sample_level:
+            if "sample_id" not in raw_df.columns:
+                raise ValueError("mix_df is sample-level but boot_results has no sample_id column")
+            raw_sel = raw_sel & (raw_df["sample_id"] == sample_id)
+            vals_all = raw_df.loc[raw_sel, value_col].to_numpy(dtype=float)
+        else:
+            sub_df = raw_df.loc[raw_sel].copy()
+            if sub_df.empty:
+                vals_all = np.array([], dtype=float)
+            elif {"bootstrap_id", "perm_round"}.issubset(sub_df.columns):
+                # Match estimate_feature_level_mixture: aggregate |SHAP| per (bootstrap, perm_round, feature[, class]).
+                group_cols = ["bootstrap_id", "perm_round", "feature"]
+                if "class_id" in sub_df.columns:
+                    group_cols.append("class_id")
+                agg = (
+                    sub_df.groupby(group_cols, as_index=False, sort=False, observed=True)[value_col]
+                    .apply(lambda v: np.sum(np.abs(v)))
+                )
+                vals_all = agg.to_numpy(dtype=float)
+            else:
+                # Fallback when bootstrap/round columns are unavailable.
+                vals_all = np.abs(sub_df[value_col].to_numpy(dtype=float))
     else:
         vals_all = np.asarray(shap_values, dtype=float).reshape(-1)
 
@@ -87,7 +134,10 @@ def plot_zero_inflated_kde_with_hist(
     if vals_all.size == 0:
         raise ValueError("No finite SHAP values available for the selected group")
 
-    is_zero = np.abs(vals_all) <= zero_tol
+    if support == "positive":
+        is_zero = vals_all <= zero_tol
+    else:
+        is_zero = np.abs(vals_all) <= zero_tol
     vals_nonzero = vals_all[~is_zero]
 
     if xlim is None:
@@ -95,22 +145,33 @@ def plot_zero_inflated_kde_with_hist(
             lo = float(np.nanpercentile(vals_nonzero, 1))
             hi = float(np.nanpercentile(vals_nonzero, 99))
             if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
-                lo, hi = -1.0, 1.0
+                lo, hi = (0.0, 1.0) if support == "positive" else (-1.0, 1.0)
             else:
                 pad = 0.1 * (hi - lo)
                 lo -= pad
                 hi += pad
-                lo = min(lo, -1e-8)
-                hi = max(hi, 1e-8)
+                if support == "positive":
+                    lo = max(lo, 0.0)
+                    hi = max(hi, lo + 1e-8)
+                else:
+                    lo = min(lo, -1e-8)
+                    hi = max(hi, 1e-8)
         else:
-            lo, hi = -1.0, 1.0
+            lo, hi = (0.0, 1.0) if support == "positive" else (-1.0, 1.0)
     else:
         lo, hi = xlim
 
     x = np.linspace(lo, hi, n_grid)
 
     if kde is not None and np.isfinite(pi_zero):
-        y = (1.0 - pi_zero) * np.exp(kde.score_samples(x.reshape(-1, 1)))
+        if support == "positive":
+            y = np.zeros_like(x, dtype=float)
+            mask = x > zero_tol
+            if np.any(mask):
+                z = np.log(x[mask]).reshape(-1, 1)
+                y[mask] = (1.0 - pi_zero) * np.exp(kde.score_samples(z)) / x[mask]
+        else:
+            y = (1.0 - pi_zero) * np.exp(kde.score_samples(x.reshape(-1, 1)))
     else:
         y = np.zeros_like(x, dtype=float)
 
@@ -151,7 +212,10 @@ def plot_zero_inflated_kde_with_hist(
     ax1.set_xlabel("SHAP value")
     ax1.set_ylabel("Density")
     if title is None:
-        title = f"Zero-inflated KDE | sample={sample_id}, feature={feature}"
+        if is_sample_level:
+            title = f"Zero-inflated KDE | sample={sample_id}, feature={feature}"
+        else:
+            title = f"Zero-inflated KDE | feature={feature}"
         if class_id is not None:
             title += f", class={class_id}"
     ax1.set_title(title)
@@ -266,6 +330,185 @@ def plot_sample_top_features_overlay(
     plt.show()
 
     return top_df
+
+
+def plot_feature_level_kde_with_hist(
+    feature_level_df,
+    feature,
+    class_id=None,
+    boot_results=None,
+    agg_values=None,
+    value_col="shap_value",
+    show_zero_spike=True,
+    spike_width=None,
+    xlim=None,
+    bins=50,
+    n_grid=1000,
+    title=None,
+):
+    """Plot estimated zero-inflated KDE density and histogram for one feature at the feature level.
+
+    Selects one row from feature_level_df by (feature[, class_id]) and overlays:
+      1) histogram of non-zero aggregated |SHAP| values scaled by (1 - pi_zero),
+      2) estimated continuous density from kde_model (positive support, log-KDE),
+      3) optional point mass spike at 0.
+
+    Raw aggregated values come from boot_results (list[DataFrame] or DataFrame) where
+    agg_shap is recomputed as sum(|shap_value|) per (bootstrap_id, perm_round).
+    Alternatively pass agg_values directly as a 1-D array.
+    """
+    if class_id is not None:
+        sel = (feature_level_df["feature"] == feature) & (feature_level_df["class_id"] == class_id)
+    else:
+        sel = feature_level_df["feature"] == feature
+
+    row_df = feature_level_df.loc[sel]
+    if row_df.empty:
+        raise ValueError(f"No row for feature={feature}, class_id={class_id}")
+    if len(row_df) > 1:
+        row_df = row_df.head(1)
+
+    row = row_df.iloc[0]
+    model = row.get("kde_model", None)
+    pi_zero = float(row.get("pi_zero", np.nan))
+    if isinstance(model, dict):
+        pi_zero = float(model.get("pi_zero", pi_zero))
+        zero_tol = float(model.get("zero_tol", 0.0))
+        kde = model.get("kde", None)
+        support = model.get("support", "real")
+    else:
+        zero_tol = 0.0
+        kde = None
+        support = "real"
+
+    # --- gather raw aggregated values for histogram ---
+    if agg_values is None:
+        if boot_results is None:
+            raise ValueError("Provide agg_values directly or provide boot_results to recompute.")
+
+        if isinstance(boot_results, list):
+            if len(boot_results) == 0:
+                raise ValueError("boot_results is an empty list")
+            raw_df = pd.concat(boot_results, ignore_index=True)
+        elif isinstance(boot_results, pd.DataFrame):
+            raw_df = boot_results
+        else:
+            raise TypeError(f"boot_results must be list[DataFrame] or DataFrame, got {type(boot_results)}")
+
+        if value_col not in raw_df.columns:
+            raise ValueError(f"{value_col} column not found in boot_results")
+
+        feat_sel = raw_df["feature"] == feature
+        if class_id is not None:
+            if "class_id" not in raw_df.columns:
+                raise ValueError("class_id provided but class_id column not present in boot_results")
+            feat_sel = feat_sel & (raw_df["class_id"] == class_id)
+
+        group_cols = [c for c in ("bootstrap_id", "perm_round") if c in raw_df.columns]
+        if class_id is not None and "class_id" in raw_df.columns:
+            group_cols.append("class_id")
+
+        if group_cols:
+            agg_series = (
+                raw_df.loc[feat_sel]
+                .groupby(group_cols, sort=False)[value_col]
+                .apply(lambda v: np.sum(np.abs(v)))
+            )
+            vals_all = agg_series.to_numpy(dtype=float)
+        else:
+            vals_all = np.abs(raw_df.loc[feat_sel, value_col].to_numpy(dtype=float))
+    else:
+        vals_all = np.asarray(agg_values, dtype=float).reshape(-1)
+
+    vals_all = vals_all[np.isfinite(vals_all)]
+    if vals_all.size == 0:
+        raise ValueError("No finite aggregated values available for the selected feature")
+
+    is_zero = vals_all <= zero_tol if support == "positive" else np.abs(vals_all) <= zero_tol
+    vals_nonzero = vals_all[~is_zero]
+
+    # --- x-axis range ---
+    if xlim is None:
+        if vals_nonzero.size > 1:
+            lo = float(np.nanpercentile(vals_nonzero, 1))
+            hi = float(np.nanpercentile(vals_nonzero, 99))
+            if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
+                lo, hi = 0.0, 1.0
+            else:
+                pad = 0.1 * (hi - lo)
+                lo = max(lo - pad, 0.0) if support == "positive" else lo - pad
+                hi += pad
+        else:
+            lo, hi = 0.0, 1.0
+    else:
+        lo, hi = xlim
+
+    x = np.linspace(lo, hi, n_grid)
+
+    # --- density from KDE model (positive support uses log-transform) ---
+    if kde is not None and np.isfinite(pi_zero):
+        if support == "positive":
+            y = np.zeros_like(x, dtype=float)
+            mask = x > zero_tol
+            if np.any(mask):
+                z = np.log(x[mask]).reshape(-1, 1)
+                y[mask] = (1.0 - pi_zero) * np.exp(kde.score_samples(z)) / x[mask]
+        else:
+            y = (1.0 - pi_zero) * np.exp(kde.score_samples(x.reshape(-1, 1)))
+    else:
+        y = np.zeros_like(x, dtype=float)
+
+    # --- histogram scaled by (1 - pi_zero) ---
+    if vals_nonzero.size > 0:
+        hist_density, bin_edges = np.histogram(vals_nonzero, bins=bins, range=(lo, hi), density=True)
+        scale = 1.0 - (float(np.mean(is_zero)) if not np.isfinite(pi_zero) else pi_zero)
+        hist_density = hist_density * max(scale, 0.0)
+    else:
+        hist_density = np.zeros(bins, dtype=float)
+        bin_edges = np.linspace(lo, hi, bins + 1)
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.bar(
+        bin_edges[:-1],
+        hist_density,
+        width=np.diff(bin_edges),
+        align="edge",
+        alpha=0.5,
+        edgecolor="black",
+        label="Histogram (non-zero, scaled)",
+    )
+    ax1.plot(x, y, linewidth=2.0, label="Estimated continuous density")
+
+    if show_zero_spike and np.isfinite(pi_zero) and pi_zero > 0:
+        if spike_width is None:
+            spike_width = (hi - lo) / bins * 0.35
+        ax1.bar(
+            -spike_width / 2,
+            pi_zero,
+            width=spike_width,
+            align="edge",
+            alpha=0.8,
+            edgecolor="red",
+            linewidth=1.5,
+            label=f"Point mass at 0 (area={pi_zero:.3f})",
+        )
+
+    ax1.set_xlabel("Aggregated |SHAP| per round")
+    ax1.set_ylabel("Density")
+    if title is None:
+        title = f"Zero-inflated KDE | feature={feature}"
+        if class_id is not None:
+            title += f", class={class_id}"
+    ax1.set_title(title)
+    ax1.legend(fontsize=8)
+
+    ax2 = ax1.twinx()
+    if np.isfinite(pi_zero):
+        ax2.vlines(0, 0, pi_zero, linestyles="--")
+    ax2.set_ylabel("P(X=0)")
+
+    plt.tight_layout()
+    plt.show()
 
 
 def plot_top_feature_with_error(
@@ -395,6 +638,10 @@ def plot_top_feature_with_error(
         }
 
     stats_df = pd.DataFrame([_model_summary_stats(row.get("kde_model")) for _, row in df.iterrows()])
+    if not stats_df.empty:
+        overlap_cols = [c for c in stats_df.columns if c in df.columns]
+        if overlap_cols:
+            df = df.drop(columns=overlap_cols)
     df = pd.concat([df.reset_index(drop=True), stats_df], axis=1)
 
     if score_col not in df.columns:
@@ -591,6 +838,10 @@ def plot_top_feature_density(
         }
 
     stats_df = pd.DataFrame([_model_summary_stats(row.get("kde_model")) for _, row in df.iterrows()])
+    if not stats_df.empty:
+        overlap_cols = [c for c in stats_df.columns if c in df.columns]
+        if overlap_cols:
+            df = df.drop(columns=overlap_cols)
     df = pd.concat([df.reset_index(drop=True), stats_df], axis=1)
 
     # Validate score_col

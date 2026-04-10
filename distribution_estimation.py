@@ -195,6 +195,79 @@ def zero_inflated_kde_pdf(x, model, include_zero_spike=False):
     return out
 
 
+def _summarize_zero_inflated_kde_model(model, n_grid=400):
+    """Compute original-scale summary metrics for a zero-inflated KDE model."""
+    if not isinstance(model, dict):
+        return {
+            "mean_abs_estimated": 0.0,
+            "mean_estimated": 0.0,
+            "var_estimated": 0.0,
+            "sd_estimated": 0.0,
+            "p_nonzero": 0.0,
+            "peak_density": 0.0,
+            "nonzero_median": 0.0,
+        }
+
+    pi_zero = float(model.get("pi_zero", np.nan))
+    p_nonzero = 0.0 if np.isnan(pi_zero) else max(0.0, 1.0 - pi_zero)
+
+    support = model.get("support", "real")
+    xmin = float(model.get("nonzero_min", np.nan))
+    xmax = float(model.get("nonzero_max", np.nan))
+    bw = float(model.get("bandwidth", 0.2))
+
+    if support == "positive":
+        hi = xmax + 4.0 * bw if np.isfinite(xmax) else 1.0
+        hi = max(hi, (xmin if np.isfinite(xmin) else 0.0) + 1e-3)
+        x_grid = np.linspace(0.0, hi, n_grid)
+    else:
+        lo = (xmin - 4.0 * bw) if np.isfinite(xmin) else -1.0
+        hi = (xmax + 4.0 * bw) if np.isfinite(xmax) else 1.0
+        if hi <= lo:
+            lo, hi = -1.0, 1.0
+        x_grid = np.linspace(lo, hi, n_grid)
+
+    y = zero_inflated_kde_pdf(x_grid, model, include_zero_spike=False)
+    y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    if y.size == 0:
+        return {
+            "mean_abs_estimated": 0.0,
+            "mean_estimated": 0.0,
+            "var_estimated": 0.0,
+            "sd_estimated": 0.0,
+            "p_nonzero": p_nonzero,
+            "peak_density": 0.0,
+            "nonzero_median": 0.0,
+        }
+
+    mean_abs = float(np.trapz(np.abs(x_grid) * y, x_grid))
+    mean_val = float(np.trapz(x_grid * y, x_grid))
+    second_moment = float(np.trapz((x_grid ** 2) * y, x_grid))
+    var_val = max(second_moment - mean_val ** 2, 0.0)
+    sd_val = float(np.sqrt(var_val))
+    peak = float(np.max(y)) if y.size else 0.0
+
+    cont_mass = float(np.trapz(y, x_grid))
+    if cont_mass > 0:
+        y_cond = y / cont_mass
+        dx = np.diff(x_grid)
+        cdf = np.concatenate(([0.0], np.cumsum(0.5 * (y_cond[:-1] + y_cond[1:]) * dx)))
+        cdf = np.clip(cdf, 0.0, 1.0)
+        nonzero_median = float(np.interp(0.5, cdf, x_grid))
+    else:
+        nonzero_median = 0.0
+
+    return {
+        "mean_abs_estimated": mean_abs,
+        "mean_estimated": mean_val,
+        "var_estimated": var_val,
+        "sd_estimated": sd_val,
+        "p_nonzero": p_nonzero,
+        "peak_density": peak,
+        "nonzero_median": nonzero_median,
+    }
+
+
 def estimate_sample_feature_distribution(
         boot_results,
         sample_cols=None,
@@ -314,7 +387,7 @@ def estimate_feature_level_mixture(
     # Aggregate: group by (bootstrap_id, perm_round, feature, [class_id])
     # and sum |SHAP| across all samples in each group
     aggregated = x.groupby(list(group_cols), as_index=False, sort=False, observed=True).agg(
-        agg_shap=("shap_value", lambda v: np.sum(np.abs(v))),
+        agg_shap=(value_col, lambda v: np.sum(np.abs(v))),
         n_samples=(value_col, "count"),
     )
 
@@ -344,6 +417,8 @@ def estimate_feature_level_mixture(
             support="positive",
         )
 
+        summary = _summarize_zero_inflated_kde_model(model)
+
         rows.append({
             **base,
             "n_bootstrap_rounds": len(feat_df),
@@ -355,6 +430,7 @@ def estimate_feature_level_mixture(
             "kernel": model["kernel"],
             "zero_tol": model["zero_tol"],
             "kde_model": model,
+            **summary,
         })
 
     return pd.DataFrame(rows)
