@@ -176,7 +176,10 @@ def plot_zero_inflated_kde_with_hist(
         y = np.zeros_like(x, dtype=float)
 
     if vals_nonzero.size > 0:
-        hist_density, bin_edges = np.histogram(vals_nonzero, bins=bins, range=(lo, hi), density=True)
+        bin_counts, bin_edges = np.histogram(vals_nonzero, bins=bins, range=(lo, hi))
+        bin_widths = np.diff(bin_edges)
+        # Normalize using total nonzero count so density is correct even when xlim clips the data
+        hist_density = bin_counts / (vals_nonzero.size * bin_widths)
         scale = 1.0 - (float(np.mean(is_zero)) if not np.isfinite(pi_zero) else pi_zero)
         hist_density = hist_density * max(scale, 0.0)
     else:
@@ -284,7 +287,7 @@ def plot_sample_top_features_overlay(
     peak_density = []
     for _, row in df.iterrows():
         y = _get_density(row["kde_model"], x)
-        mean_abs_est.append(np.trapz(np.abs(x) * y, x))
+        mean_abs_est.append(max(float(np.trapz(np.abs(x) * y, x)), 0.0))
         p_nonzero.append(1.0 - float(row["pi_zero"]))
         peak_density.append(float(np.max(y)) if y.size else 0.0)
 
@@ -381,46 +384,105 @@ def plot_feature_level_kde_with_hist(
         kde = None
         support = "real"
 
+    # # --- gather raw aggregated values for histogram ---
+    # if agg_values is None:
+    #     if boot_results is None:
+    #         raise ValueError("Provide agg_values directly or provide boot_results to recompute.")
+
+    #     if isinstance(boot_results, list):
+    #         if len(boot_results) == 0:
+    #             raise ValueError("boot_results is an empty list")
+    #         raw_df = pd.concat(boot_results, ignore_index=True)
+    #     elif isinstance(boot_results, pd.DataFrame):
+    #         raw_df = boot_results
+    #     else:
+    #         raise TypeError(f"boot_results must be list[DataFrame] or DataFrame, got {type(boot_results)}")
+
+    #     if value_col not in raw_df.columns:
+    #         raise ValueError(f"{value_col} column not found in boot_results")
+
+    #     feat_sel = raw_df["feature"] == feature
+    #     if class_id is not None:
+    #         if "class_id" not in raw_df.columns:
+    #             raise ValueError("class_id provided but class_id column not present in boot_results")
+    #         feat_sel = feat_sel & (raw_df["class_id"] == class_id)
+
+    #     group_cols = [c for c in ("bootstrap_id", "perm_round") if c in raw_df.columns]
+    #     if class_id is not None and "class_id" in raw_df.columns:
+    #         group_cols.append("class_id")
+
+    #     if group_cols:
+    #         agg_series = (
+    #             raw_df.loc[feat_sel]
+    #             .groupby(group_cols, sort=False)[value_col]
+    #             .apply(lambda v: np.sum(np.abs(v)))
+    #         )
+    #         vals_all = agg_series.to_numpy(dtype=float)
+    #     else:
+    #         vals_all = np.abs(raw_df.loc[feat_sel, value_col].to_numpy(dtype=float))
+    # else:
+    #     vals_all = np.asarray(agg_values, dtype=float).reshape(-1)
+
+    # vals_all = vals_all[np.isfinite(vals_all)]
+
+
+    # ...existing code...
+
     # --- gather raw aggregated values for histogram ---
     if agg_values is None:
         if boot_results is None:
             raise ValueError("Provide agg_values directly or provide boot_results to recompute.")
 
+        def _extract_vals_from_df(raw_df):
+            if value_col not in raw_df.columns:
+                raise ValueError(f"{value_col} column not found in boot_results")
+
+            feat_sel = raw_df["feature"] == feature
+            if class_id is not None:
+                if "class_id" not in raw_df.columns:
+                    raise ValueError("class_id provided but class_id column not present in boot_results")
+                feat_sel = feat_sel & (raw_df["class_id"] == class_id)
+
+            sub = raw_df.loc[feat_sel]
+            if sub.empty:
+                return np.array([], dtype=float)
+
+            group_cols = [c for c in ("bootstrap_id", "perm_round") if c in sub.columns]
+            if class_id is not None and "class_id" in sub.columns:
+                group_cols.append("class_id")
+
+            if group_cols:
+                # faster/lighter than groupby(...).apply(lambda v: np.sum(np.abs(v)))
+                abs_vals = np.abs(sub[value_col].to_numpy(dtype=float))
+                key_df = sub[group_cols].copy()
+                key_df["_abs"] = abs_vals
+                agg_series = key_df.groupby(group_cols, sort=False, observed=True)["_abs"].sum()
+                return agg_series.to_numpy(dtype=float)
+            else:
+                return np.abs(sub[value_col].to_numpy(dtype=float))
+
         if isinstance(boot_results, list):
             if len(boot_results) == 0:
                 raise ValueError("boot_results is an empty list")
-            raw_df = pd.concat(boot_results, ignore_index=True)
+
+            # no pd.concat; process each DataFrame separately
+            vals_chunks = []
+            for df_i in boot_results:
+                vals_i = _extract_vals_from_df(df_i)
+                if vals_i.size:
+                    vals_chunks.append(vals_i)
+
+            vals_all = np.concatenate(vals_chunks) if vals_chunks else np.array([], dtype=float)
+
         elif isinstance(boot_results, pd.DataFrame):
-            raw_df = boot_results
+            vals_all = _extract_vals_from_df(boot_results)
+
         else:
             raise TypeError(f"boot_results must be list[DataFrame] or DataFrame, got {type(boot_results)}")
-
-        if value_col not in raw_df.columns:
-            raise ValueError(f"{value_col} column not found in boot_results")
-
-        feat_sel = raw_df["feature"] == feature
-        if class_id is not None:
-            if "class_id" not in raw_df.columns:
-                raise ValueError("class_id provided but class_id column not present in boot_results")
-            feat_sel = feat_sel & (raw_df["class_id"] == class_id)
-
-        group_cols = [c for c in ("bootstrap_id", "perm_round") if c in raw_df.columns]
-        if class_id is not None and "class_id" in raw_df.columns:
-            group_cols.append("class_id")
-
-        if group_cols:
-            agg_series = (
-                raw_df.loc[feat_sel]
-                .groupby(group_cols, sort=False)[value_col]
-                .apply(lambda v: np.sum(np.abs(v)))
-            )
-            vals_all = agg_series.to_numpy(dtype=float)
-        else:
-            vals_all = np.abs(raw_df.loc[feat_sel, value_col].to_numpy(dtype=float))
     else:
         vals_all = np.asarray(agg_values, dtype=float).reshape(-1)
-
-    vals_all = vals_all[np.isfinite(vals_all)]
+    
+    vals_all = vals_all[np.isfinite(vals_all)]    
     if vals_all.size == 0:
         raise ValueError("No finite aggregated values available for the selected feature")
 
@@ -460,7 +522,10 @@ def plot_feature_level_kde_with_hist(
 
     # --- histogram scaled by (1 - pi_zero) ---
     if vals_nonzero.size > 0:
-        hist_density, bin_edges = np.histogram(vals_nonzero, bins=bins, range=(lo, hi), density=True)
+        bin_counts, bin_edges = np.histogram(vals_nonzero, bins=bins, range=(lo, hi))
+        bin_widths = np.diff(bin_edges)
+        # Normalize using total nonzero count so density is correct even when xlim clips the data
+        hist_density = bin_counts / (vals_nonzero.size * bin_widths)
         scale = 1.0 - (float(np.mean(is_zero)) if not np.isfinite(pi_zero) else pi_zero)
         hist_density = hist_density * max(scale, 0.0)
     else:
@@ -494,6 +559,162 @@ def plot_feature_level_kde_with_hist(
         )
 
     ax1.set_xlabel("Aggregated |SHAP| per round")
+    ax1.set_ylabel("Density")
+    if title is None:
+        title = f"Zero-inflated KDE | feature={feature}"
+        if class_id is not None:
+            title += f", class={class_id}"
+    ax1.set_title(title)
+    ax1.legend(fontsize=8)
+
+    ax2 = ax1.twinx()
+    if np.isfinite(pi_zero):
+        ax2.vlines(0, 0, pi_zero, linestyles="--")
+    ax2.set_ylabel("P(X=0)")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_feature_level_kde_with_hist_preagg(
+    feature_level_df,
+    feature,
+    boot_results,
+    class_id=None,
+    agg_col="sum_abs_shap",
+    show_zero_spike=True,
+    spike_width=None,
+    xlim=None,
+    bins=50,
+    n_grid=1000,
+    title=None,
+):
+    """Like plot_feature_level_kde_with_hist but for pre-aggregated boot_results.
+
+    Use when boot_results come from ``boot_multi_repeat_inference_keep_feature``,
+    where each row already contains ``sum_abs_shap`` (or the column named by
+    *agg_col*) — no per-sample re-aggregation is performed.
+    """
+    if class_id is not None:
+        sel = (feature_level_df["feature"] == feature) & (feature_level_df["class_id"] == class_id)
+    else:
+        sel = feature_level_df["feature"] == feature
+
+    row_df = feature_level_df.loc[sel]
+    if row_df.empty:
+        raise ValueError(f"No row for feature={feature}, class_id={class_id}")
+    row = row_df.iloc[0]
+
+    model = row.get("kde_model", None)
+    pi_zero = float(row.get("pi_zero", np.nan))
+    if isinstance(model, dict):
+        pi_zero = float(model.get("pi_zero", pi_zero))
+        zero_tol = float(model.get("zero_tol", 0.0))
+        kde = model.get("kde", None)
+        support = model.get("support", "real")
+    else:
+        zero_tol = 0.0
+        kde = None
+        support = "real"
+
+    # --- gather pre-aggregated values for histogram ---
+    if isinstance(boot_results, list):
+        if len(boot_results) == 0:
+            raise ValueError("boot_results is an empty list")
+        raw_df = pd.concat(boot_results, ignore_index=True, copy=False)
+    elif isinstance(boot_results, pd.DataFrame):
+        raw_df = boot_results
+    else:
+        raise TypeError(f"boot_results must be list[DataFrame] or DataFrame, got {type(boot_results)}")
+
+    if agg_col not in raw_df.columns:
+        raise ValueError(f"agg_col '{agg_col}' not found in boot_results columns: {list(raw_df.columns)}")
+
+    feat_sel = raw_df["feature"] == feature
+    if class_id is not None:
+        if "class_id" not in raw_df.columns:
+            raise ValueError("class_id provided but class_id column not present in boot_results")
+        feat_sel = feat_sel & (raw_df["class_id"] == class_id)
+
+    vals_all = raw_df.loc[feat_sel, agg_col].to_numpy(dtype=float)
+    vals_all = vals_all[np.isfinite(vals_all)]
+
+    if vals_all.size == 0:
+        raise ValueError(f"No finite values for feature={feature} in boot_results['{agg_col}']")
+
+    is_zero = vals_all <= zero_tol if support == "positive" else np.abs(vals_all) <= zero_tol
+    vals_nonzero = vals_all[~is_zero]
+
+    # --- x-axis range ---
+    if xlim is None:
+        if vals_nonzero.size > 1:
+            lo = float(np.nanpercentile(vals_nonzero, 1))
+            hi = float(np.nanpercentile(vals_nonzero, 99))
+            if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
+                lo, hi = 0.0, 1.0
+            else:
+                pad = 0.1 * (hi - lo)
+                lo = max(lo - pad, 0.0) if support == "positive" else lo - pad
+                hi += pad
+        else:
+            lo, hi = 0.0, 1.0
+    else:
+        lo, hi = xlim
+
+    x = np.linspace(lo, hi, n_grid)
+
+    # --- density from KDE model ---
+    if kde is not None and np.isfinite(pi_zero):
+        if support == "positive":
+            y = np.zeros_like(x, dtype=float)
+            mask = x > zero_tol
+            if np.any(mask):
+                z = np.log(x[mask]).reshape(-1, 1)
+                y[mask] = (1.0 - pi_zero) * np.exp(kde.score_samples(z)) / x[mask]
+        else:
+            y = (1.0 - pi_zero) * np.exp(kde.score_samples(x.reshape(-1, 1)))
+    else:
+        y = np.zeros_like(x, dtype=float)
+
+    # --- histogram scaled by (1 - pi_zero) ---
+    if vals_nonzero.size > 0:
+        bin_counts, bin_edges = np.histogram(vals_nonzero, bins=bins, range=(lo, hi))
+        bin_widths = np.diff(bin_edges)
+        # Normalize using total nonzero count so density is correct even when xlim clips the data
+        hist_density = bin_counts / (vals_nonzero.size * bin_widths)
+        scale = 1.0 - (float(np.mean(is_zero)) if not np.isfinite(pi_zero) else pi_zero)
+        hist_density = hist_density * max(scale, 0.0)
+    else:
+        hist_density = np.zeros(bins, dtype=float)
+        bin_edges = np.linspace(lo, hi, bins + 1)
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.bar(
+        bin_edges[:-1],
+        hist_density,
+        width=np.diff(bin_edges),
+        align="edge",
+        alpha=0.5,
+        edgecolor="black",
+        label="Histogram (non-zero, scaled)",
+    )
+    ax1.plot(x, y, linewidth=2.0, label="Estimated continuous density")
+
+    if show_zero_spike and np.isfinite(pi_zero) and pi_zero > 0:
+        if spike_width is None:
+            spike_width = (hi - lo) / bins * 0.35
+        ax1.bar(
+            -spike_width / 2,
+            pi_zero,
+            width=spike_width,
+            align="edge",
+            alpha=0.8,
+            edgecolor="red",
+            linewidth=1.5,
+            label=f"Point mass at 0 (area={pi_zero:.3f})",
+        )
+
+    ax1.set_xlabel(f"Aggregated |SHAP| per round ({agg_col})")
     ax1.set_ylabel("Density")
     if title is None:
         title = f"Zero-inflated KDE | feature={feature}"
@@ -610,7 +831,7 @@ def plot_top_feature_with_error(
                 "nonzero_median": 0.0,
             }
 
-        mean_abs = float(np.trapz(np.abs(x_grid) * y, x_grid))
+        mean_abs = max(float(np.trapz(np.abs(x_grid) * y, x_grid)), 0.0)
         mean_val = float(np.trapz(x_grid * y, x_grid))
         second_moment = float(np.trapz((x_grid ** 2) * y, x_grid))
         var_val = max(second_moment - mean_val ** 2, 0.0)
@@ -810,7 +1031,7 @@ def plot_top_feature_density(
                 "nonzero_median": 0.0,
             }
 
-        mean_abs = float(np.trapz(np.abs(x_grid) * y, x_grid))
+        mean_abs = max(float(np.trapz(np.abs(x_grid) * y, x_grid)), 0.0)
         mean_val = float(np.trapz(x_grid * y, x_grid))
         second_moment = float(np.trapz((x_grid ** 2) * y, x_grid))
         var_val = max(second_moment - mean_val ** 2, 0.0)

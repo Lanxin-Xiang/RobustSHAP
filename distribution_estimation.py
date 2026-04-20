@@ -1,6 +1,8 @@
 from scipy.stats import gamma
 from sklearn.neighbors import KernelDensity
 
+from collections import defaultdict
+
 import numpy as np
 import pandas as pd
 
@@ -110,10 +112,12 @@ def fit_zero_inflated_kde(
     kde = None
     nonzero_min = np.nan
     nonzero_max = np.nan
+    nonzero_empirical_median = np.nan
     if n_nonzero > 0:
         nz = arr[~is_zero]
         nonzero_min = float(np.min(nz))
         nonzero_max = float(np.max(nz))
+        nonzero_empirical_median = float(np.median(nz))
         kde = KernelDensity(kernel=kernel, bandwidth=bandwidth)
         if support == "positive":
             kde.fit(np.log(nz).reshape(-1, 1))
@@ -131,6 +135,7 @@ def fit_zero_inflated_kde(
         "support": support,
         "nonzero_min": nonzero_min,
         "nonzero_max": nonzero_max,
+        "nonzero_empirical_median": nonzero_empirical_median,
         "kde": kde,
     }
 
@@ -206,6 +211,7 @@ def _summarize_zero_inflated_kde_model(model, n_grid=400):
             "p_nonzero": 0.0,
             "peak_density": 0.0,
             "nonzero_median": 0.0,
+            "nonzero_median_kde": 0.0,
         }
 
     pi_zero = float(model.get("pi_zero", np.nan))
@@ -238,9 +244,10 @@ def _summarize_zero_inflated_kde_model(model, n_grid=400):
             "p_nonzero": p_nonzero,
             "peak_density": 0.0,
             "nonzero_median": 0.0,
+            "nonzero_median_kde": 0.0,
         }
 
-    mean_abs = float(np.trapz(np.abs(x_grid) * y, x_grid))
+    mean_abs = max(float(np.trapz(np.abs(x_grid) * y, x_grid)), 0.0)
     mean_val = float(np.trapz(x_grid * y, x_grid))
     second_moment = float(np.trapz((x_grid ** 2) * y, x_grid))
     var_val = max(second_moment - mean_val ** 2, 0.0)
@@ -253,7 +260,13 @@ def _summarize_zero_inflated_kde_model(model, n_grid=400):
         dx = np.diff(x_grid)
         cdf = np.concatenate(([0.0], np.cumsum(0.5 * (y_cond[:-1] + y_cond[1:]) * dx)))
         cdf = np.clip(cdf, 0.0, 1.0)
-        nonzero_median = float(np.interp(0.5, cdf, x_grid))
+        nonzero_median_kde = float(np.interp(0.5, cdf, x_grid))
+    else:
+        nonzero_median_kde = 0.0
+
+    empirical_median = model.get("nonzero_empirical_median", np.nan)
+    if np.isfinite(empirical_median):
+        nonzero_median = float(empirical_median)
     else:
         nonzero_median = 0.0
 
@@ -265,6 +278,7 @@ def _summarize_zero_inflated_kde_model(model, n_grid=400):
         "p_nonzero": p_nonzero,
         "peak_density": peak,
         "nonzero_median": nonzero_median,
+        "nonzero_median_kde": nonzero_median_kde,
     }
 
 
@@ -386,10 +400,23 @@ def estimate_feature_level_mixture(
 
     # Aggregate: group by (bootstrap_id, perm_round, feature, [class_id])
     # and sum |SHAP| across all samples in each group
-    aggregated = x.groupby(list(group_cols), as_index=False, sort=False, observed=True).agg(
-        agg_shap=(value_col, lambda v: np.sum(np.abs(v))),
-        n_samples=(value_col, "count"),
+    # aggregated = x.groupby(list(group_cols), as_index=False, sort=False, observed=True).agg(
+    #     agg_shap=(value_col, lambda v: np.sum(np.abs(v))),
+    #     n_samples=(value_col, "count"),
+    # )
+
+    x = x.copy()
+    x["_abs_shap"] = x[value_col].abs()
+
+    aggregated = (
+        x.groupby(list(group_cols), as_index=False, sort=False, observed=True)
+        .agg(
+            agg_shap=("_abs_shap", "sum"),
+            n_samples=(value_col, "count"),
+        )
     )
+
+
 
     # Determine feature group columns (for fitting KDE per feature)
     has_class = "class_id" in group_cols
@@ -415,6 +442,195 @@ def estimate_feature_level_mixture(
             kernel=kernel,
             zero_tol=zero_tol,
             support="positive",
+        )
+
+        summary = _summarize_zero_inflated_kde_model(model)
+
+        rows.append({
+            **base,
+            "n_bootstrap_rounds": len(feat_df),
+            "n_total": model["n_total"],
+            "n_zero": model["n_zero"],
+            "n_nonzero": model["n_nonzero"],
+            "pi_zero": model["pi_zero"],
+            "bandwidth": model["bandwidth"],
+            "kernel": model["kernel"],
+            "zero_tol": model["zero_tol"],
+            "kde_model": model,
+            **summary,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def estimate_feature_level_mixture_preagg(
+    boot_results,
+    agg_col="sum_abs_shap",
+    bandwidth=0.2,
+    kernel="gaussian",
+    zero_tol=0.0,
+    support="positive",
+):
+    """Fit zero-inflated KDE per feature from pre-aggregated bootstrap results.
+
+    Use this when boot_results come from ``boot_multi_repeat_inference_keep_feature``.
+    The default aggregation uses per-sample mean absolute SHAP (``mean_abs_shap``)
+    to keep scale consistent with feature importance summaries. If ``mean_abs_shap``
+    is unavailable, the function automatically falls back to ``sum_abs_shap``.
+
+    Parameters
+    ----------
+    boot_results : list of pd.DataFrame
+        Each DataFrame must contain ``feature``, ``perm_round``, ``bootstrap_id``,
+        ``sum_abs_shap`` (or the column named by *agg_col*), and optionally
+        ``class_id``.
+    agg_col : str
+        Column holding the pre-aggregated SHAP value (default ``"mean_abs_shap"``).
+        If the requested column is missing and is ``"mean_abs_shap"``, the function
+        falls back to ``"sum_abs_shap"`` when available.
+    bandwidth, kernel, zero_tol
+        Passed directly to :func:`fit_zero_inflated_kde`.
+    support : {"positive", "real"}
+        KDE support used in :func:`fit_zero_inflated_kde`. Use "positive" for
+        nonnegative aggregates like |SHAP| sums, and "real" for signed sums.
+    """
+    if support not in {"positive", "real"}:
+        raise ValueError("support must be 'positive' or 'real'")
+
+    if not isinstance(boot_results, list):
+        raise TypeError(f"boot_results must be a list of DataFrames, got {type(boot_results)}")
+    if len(boot_results) == 0:
+        return pd.DataFrame()
+
+    first = boot_results[0]
+    has_class = "class_id" in first.columns
+
+    aggregated = pd.concat(boot_results, ignore_index=True, copy=False)
+
+    if agg_col not in aggregated.columns:
+        if agg_col == "mean_abs_shap" and "sum_abs_shap" in aggregated.columns:
+            agg_col = "sum_abs_shap"
+        else:
+            raise ValueError(
+                f"Column '{agg_col}' not found in boot_results. "
+                f"Available columns include: {sorted(aggregated.columns.tolist())}"
+            )
+
+    if "feature" in aggregated.columns and aggregated["feature"].dtype == "object":
+        aggregated["feature"] = aggregated["feature"].astype("category")
+    if has_class and aggregated["class_id"].dtype == "object":
+        aggregated["class_id"] = aggregated["class_id"].astype("category")
+
+    feat_group_cols = ["feature", "class_id"] if has_class else ["feature"]
+
+    rows = []
+    for key, feat_df in aggregated.groupby(feat_group_cols, sort=False, observed=True):
+        key = key if isinstance(key, tuple) else (key,)
+        base = {c: v for c, v in zip(feat_group_cols, key)}
+
+        agg_values = feat_df[agg_col].to_numpy()
+
+        model = fit_zero_inflated_kde(
+            values=agg_values,
+            bandwidth=bandwidth,
+            kernel=kernel,
+            zero_tol=zero_tol,
+            support=support,
+        )
+
+        summary = _summarize_zero_inflated_kde_model(model)
+
+        rows.append({
+            **base,
+            "n_bootstrap_rounds": len(feat_df),
+            "n_total": model["n_total"],
+            "n_zero": model["n_zero"],
+            "n_nonzero": model["n_nonzero"],
+            "pi_zero": model["pi_zero"],
+            "bandwidth": model["bandwidth"],
+            "kernel": model["kernel"],
+            "zero_tol": model["zero_tol"],
+            "kde_model": model,
+            "median": float(np.median(agg_values)),
+            "std": float(np.std(agg_values, ddof=1)),
+            **summary,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def estimate_feature_level_mixture_fast(
+    boot_results,
+    group_cols=None,
+    value_col="shap_value",
+    bandwidth=0.2,
+    kernel="gaussian",
+    zero_tol=0.0,
+    support="positive",
+):
+    if support not in {"positive", "real"}:
+        raise ValueError("support must be 'positive' or 'real'")
+
+    if not isinstance(boot_results, list):
+        raise TypeError(f"boot_results must be a list of DataFrames, got {type(boot_results)}")
+    if len(boot_results) == 0:
+        return pd.DataFrame()
+
+    first = boot_results[0]
+    if group_cols is None:
+        has_class = "class_id" in first.columns
+        group_cols = (
+            ("bootstrap_id", "perm_round", "class_id", "feature")
+            if has_class
+            else ("bootstrap_id", "perm_round", "feature")
+        )
+
+    pieces = []
+    needed = list(set(group_cols) | {value_col})
+
+    for df in boot_results:
+        cols = [c for c in needed if c in df.columns]
+        tmp = df[cols].copy()
+
+        if tmp.empty:
+            continue
+
+        if "feature" in tmp.columns and tmp["feature"].dtype == "object":
+            tmp["feature"] = tmp["feature"].astype("category")
+        if "class_id" in tmp.columns and tmp["class_id"].dtype == "object":
+            tmp["class_id"] = tmp["class_id"].astype("category")
+
+        tmp["_abs_shap"] = tmp[value_col].abs()
+
+        agg = (
+            tmp.groupby(list(group_cols), as_index=False, sort=False, observed=True)
+               .agg(
+                   agg_shap=("_abs_shap", "sum"),
+                   n_samples=(value_col, "count"),
+               )
+        )
+        pieces.append(agg)
+
+    if not pieces:
+        return pd.DataFrame()
+
+    aggregated = pd.concat(pieces, ignore_index=True)
+
+    feat_group_cols = ["feature", "class_id"] if "class_id" in group_cols else ["feature"]
+
+    rows = []
+    for key, feat_df in aggregated.groupby(feat_group_cols, sort=False, observed=True):
+        key = key if isinstance(key, tuple) else (key,)
+        base = {c: v for c, v in zip(feat_group_cols, key)}
+
+        agg_values = feat_df["agg_shap"].to_numpy()
+
+        model = fit_zero_inflated_kde(
+            values=agg_values,
+            bandwidth=bandwidth,
+            kernel=kernel,
+            zero_tol=zero_tol,
+            support=support,
         )
 
         summary = _summarize_zero_inflated_kde_model(model)

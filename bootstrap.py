@@ -345,6 +345,112 @@ def boot_multi_repeat_inference_keep_all(
             return parallel(jobs)
     return parallel(jobs)
 
+# ...existing code...
+
+def _boot_1_repeat_feature_agg_job(
+    bootstrap_id, rs,
+    X, y, task, b_model, zero_tol,
+    params, num_boost_round, xgb_nthread,
+    inner_variance, model_wrapper,
+):
+    """Like _boot_1_repeat_df_job but aggregates |SHAP| over samples immediately."""
+    if model_wrapper is None and params is not None:
+        params_local = params.copy()
+        if xgb_nthread is not None:
+            params_local["nthread"] = xgb_nthread
+    else:
+        params_local = params
+
+    result = boot_1_repeat_inference(
+        X=X, y=y, task=task,
+        r_model=b_model, zero_tol=zero_tol,
+        inner_variance=inner_variance,
+        params=params_local,
+        boot_random_state=rs,
+        num_boost_round=num_boost_round,
+        model_wrapper=model_wrapper,
+    )
+
+    # Aggregate |SHAP| over all samples per (feature, perm_round)
+    group_cols = ["feature", "perm_round"]
+    if "class_id" in result.columns:
+        group_cols.insert(1, "class_id")
+
+    agg = (
+        result.groupby(group_cols, as_index=False)
+        .agg(
+            sum_abs_shap=("shap_value", lambda x: x.abs().sum()),
+            mean_abs_shap=("shap_value", lambda x: x.abs().mean()),
+            n_samples=("shap_value", "count"),
+        )
+    )
+    agg["bootstrap_id"] = bootstrap_id
+    agg["boot_random_state"] = rs
+    return agg
+
+
+def boot_multi_repeat_inference_keep_feature(
+    X,
+    y,
+    task,
+    n_bootstrap,
+    b_model,
+    zero_tol,
+    params=None,
+    inner_variance="seed",
+    bootstrap_random_states=None,
+    num_boost_round=150,
+    n_jobs=-1,
+    backend="loky",
+    xgb_nthread=1,
+    show_progress=True,
+    tqdm_desc="Bootstrap repeats (feature-agg)",
+    pre_dispatch="2*n_jobs",
+    model_wrapper=None,
+):
+    """
+    Like boot_multi_repeat_inference_keep_all but aggregates |SHAP| over
+    all OOB samples per feature per perm_round, dropping sample_id.
+
+    Returns
+    -------
+    list of pd.DataFrame
+        Each DataFrame has columns:
+        - binary/regression: feature, perm_round, sum_abs_shap, mean_abs_shap,
+                             n_samples, bootstrap_id, boot_random_state
+        - multiclass: feature, class_id, perm_round, sum_abs_shap, mean_abs_shap,
+                      n_samples, bootstrap_id, boot_random_state
+    """
+    if model_wrapper is None and params is None:
+        raise ValueError("Either model_wrapper or params must be provided.")
+
+    _normalize_inner_variance(inner_variance)
+
+    if bootstrap_random_states is None:
+        bootstrap_random_states = list(range(n_bootstrap))
+    elif len(bootstrap_random_states) != n_bootstrap:
+        raise ValueError("len(bootstrap_random_states) must equal n_bootstrap.")
+
+    task_norm = _normalize_task(task)
+    parallel = Parallel(n_jobs=n_jobs, backend=backend, pre_dispatch=pre_dispatch, verbose=0)
+
+    jobs = (
+        delayed(_boot_1_repeat_feature_agg_job)(
+            bootstrap_id=i, rs=rs,
+            X=X, y=y, task=task_norm,
+            b_model=b_model, zero_tol=zero_tol,
+            params=params, num_boost_round=num_boost_round,
+            xgb_nthread=xgb_nthread,
+            inner_variance=inner_variance,
+            model_wrapper=model_wrapper,
+        )
+        for i, rs in enumerate(bootstrap_random_states)
+    )
+
+    if show_progress:
+        with tqdm_joblib(tqdm(total=n_bootstrap, desc=tqdm_desc)):
+            return parallel(jobs)
+    return parallel(jobs)
 
 # ---------------------------------------------------------------------------
 # Seed importance (standalone diagnostic)
