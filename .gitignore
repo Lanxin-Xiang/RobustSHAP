@@ -27,4 +27,4 @@ Thumbs.db
 # Project-specific
 archive/
 shap_results/
-figures/
+# figures/
