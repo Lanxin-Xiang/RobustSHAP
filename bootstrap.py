@@ -16,6 +16,12 @@ try:
 except ImportError:
     ModelWrapper = None
 
+try:
+    from imblearn.over_sampling import SMOTE
+    _SMOTE_AVAILABLE = True
+except ImportError:
+    _SMOTE_AVAILABLE = False
+
 os.environ.setdefault("LOKY_PICKLER", "cloudpickle")
 
 
@@ -84,6 +90,8 @@ def boot_1_repeat_inference(
     boot_random_state=42,
     num_boost_round=100,
     model_wrapper=None,
+    smote=False,
+    smote_k_neighbors=5,
 ):
     # zero_tol is intentionally unused in raw-output mode, retained for API compatibility.
     _ = zero_tol
@@ -107,6 +115,15 @@ def boot_1_repeat_inference(
     oob_mask = ~X.index.isin(X_boot_train.index)
     X_boot_test = X.loc[oob_mask]
     y_boot_test = y.loc[oob_mask]
+
+    # SMOTE oversampling on training set only (OOB is never touched).
+    if smote:
+        if not _SMOTE_AVAILABLE:
+            raise ImportError("imbalanced-learn is required for smote=True: pip install imbalanced-learn")
+        sm = SMOTE(k_neighbors=smote_k_neighbors, random_state=boot_random_state)
+        X_boot_train_arr, y_boot_train_arr = sm.fit_resample(X_boot_train.values, y_boot_train.values)
+        X_boot_train = pd.DataFrame(X_boot_train_arr, columns=X_boot_train.columns)
+        y_boot_train = pd.Series(y_boot_train_arr)
 
     feature_names = X.columns.to_numpy()
     n_feat = X.shape[1]
@@ -352,6 +369,9 @@ def _boot_1_repeat_feature_agg_job(
     X, y, task, b_model, zero_tol,
     params, num_boost_round, xgb_nthread,
     inner_variance, model_wrapper,
+    positive_only=False,
+    smote=False,
+    smote_k_neighbors=5,
 ):
     """Like _boot_1_repeat_df_job but aggregates |SHAP| over samples immediately."""
     if model_wrapper is None and params is not None:
@@ -369,16 +389,32 @@ def _boot_1_repeat_feature_agg_job(
         boot_random_state=rs,
         num_boost_round=num_boost_round,
         model_wrapper=model_wrapper,
+        smote=smote,
+        smote_k_neighbors=smote_k_neighbors,
     )
 
-    # Aggregate |SHAP| over all samples per (feature, perm_round)
+    # Optionally restrict aggregation to positive-class OOB samples only,
+    # or keep both classes separated by adding a "label" groupby key.
+    if not result.empty:
+        if positive_only == "both":
+            label_map = y.reindex(result["sample_id"].values).values
+            result = result.copy()
+            result["label"] = label_map
+        elif positive_only:
+            pos_ids = y.index[y == 1]
+            result = result[result["sample_id"].isin(pos_ids)]
+
+    # Aggregate |SHAP| over samples per (feature, perm_round)
     group_cols = ["feature", "perm_round"]
     if "class_id" in result.columns:
         group_cols.insert(1, "class_id")
+    if not result.empty and "label" in result.columns:
+        group_cols = ["label"] + group_cols
 
     agg = (
         result.groupby(group_cols, as_index=False)
         .agg(
+            sum_shap=("shap_value", "sum"),
             sum_abs_shap=("shap_value", lambda x: x.abs().sum()),
             mean_abs_shap=("shap_value", lambda x: x.abs().mean()),
             n_samples=("shap_value", "count"),
@@ -407,10 +443,25 @@ def boot_multi_repeat_inference_keep_feature(
     tqdm_desc="Bootstrap repeats (feature-agg)",
     pre_dispatch="2*n_jobs",
     model_wrapper=None,
+    positive_only=False,
+    smote=False,
+    smote_k_neighbors=5,
 ):
     """
     Like boot_multi_repeat_inference_keep_all but aggregates |SHAP| over
-    all OOB samples per feature per perm_round, dropping sample_id.
+    OOB samples per feature per perm_round, dropping sample_id.
+
+    Parameters
+    ----------
+    positive_only : bool or "both", default False
+        If True, aggregate SHAP only over positive-class (y==1) OOB samples.
+        If "both", aggregate separately for each class; results include a
+        "label" column (0 or 1) so positive and negative rows are separated.
+    smote : bool, default False
+        If True, apply SMOTE to the bootstrap training set before fitting.
+        OOB set is never oversampled. Requires imbalanced-learn.
+    smote_k_neighbors : int, default 5
+        Number of nearest neighbors used by SMOTE.
 
     Returns
     -------
@@ -443,6 +494,9 @@ def boot_multi_repeat_inference_keep_feature(
             xgb_nthread=xgb_nthread,
             inner_variance=inner_variance,
             model_wrapper=model_wrapper,
+            positive_only=positive_only,
+            smote=smote,
+            smote_k_neighbors=smote_k_neighbors,
         )
         for i, rs in enumerate(bootstrap_random_states)
     )

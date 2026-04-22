@@ -55,12 +55,15 @@ class XGBoostWrapper(ModelWrapper):
         dtest = xgb.DMatrix(X_test, enable_categorical=True)
         shap_values = self.model.predict(dtest, pred_contribs=True, strict_shape=True)
         
-        # Extract feature contributions (remove bias term)
-        if task == "multiclass":
-            # Shape: (n_samples, n_classes, n_features + 1)
-            return shap_values[:, :, :-1]
+        # Extract feature contributions (remove bias term).
+        # strict_shape=True returns (n_samples, 1, n_features+1) for binary,
+        # (n_samples, n_classes, n_features+1) for multiclass.
+        if shap_values.ndim == 3:
+            if task == "multiclass":
+                return shap_values[:, :, :-1]
+            else:
+                return shap_values[:, 0, :-1]
         else:
-            # Shape: (n_samples, n_features + 1)
             return shap_values[:, :-1]
 
 
@@ -176,6 +179,9 @@ class SklearnWrapper(ModelWrapper):
             if isinstance(shap_values, list):
                 # Use positive class SHAP values
                 shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+            # Newer SHAP versions return (n_samples, n_features, n_classes) for binary
+            if len(shap_values.shape) == 3:
+                shap_values = shap_values[:, :, 1]
             # Ensure 2D
             if len(shap_values.shape) == 1:
                 shap_values = shap_values.reshape(-1, 1)
@@ -289,10 +295,18 @@ class CatBoostWrapper(ModelWrapper):
         except ImportError:
             raise ImportError("CatBoost not installed. Install with: pip install catboost")
         
+        skip = {'iterations', 'verbose', 'seed', 'random_state'}
+        params = {k: v for k, v in self.params.items() if k not in skip}
+        # normalise random seed to CatBoost's expected kwarg
+        seed_val = self.params.get('random_seed',
+                   self.params.get('seed',
+                   self.params.get('random_state')))
+        if seed_val is not None:
+            params['random_seed'] = seed_val
         self.model = CatBoostClassifier(
             iterations=self.num_boost_round,
             verbose=False,
-            **self.params
+            **params
         )
         self.model.fit(X_train, y_train)
         return self
@@ -474,7 +488,10 @@ class PyTorchWrapper(ModelWrapper):
         else:
             if isinstance(shap_values, list):
                 shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
-        
+            # Newer SHAP versions return (n_samples, n_features, n_classes) for binary
+            if len(shap_values.shape) == 3:
+                shap_values = shap_values[:, :, 1]
+
         return shap_values
 
 

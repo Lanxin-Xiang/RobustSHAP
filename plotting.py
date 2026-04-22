@@ -694,8 +694,9 @@ def plot_feature_level_kde_with_hist_preagg(
         hist_density,
         width=np.diff(bin_edges),
         align="edge",
-        alpha=0.5,
-        edgecolor="black",
+        alpha=0.3,
+        color="grey",
+        edgecolor="none",
         label="Histogram (non-zero, scaled)",
     )
     ax1.plot(x, y, linewidth=2.0, label="Estimated continuous density")
@@ -709,8 +710,8 @@ def plot_feature_level_kde_with_hist_preagg(
             width=spike_width,
             align="edge",
             alpha=0.8,
-            edgecolor="red",
-            linewidth=1.5,
+            color="red",
+            edgecolor="none",
             label=f"Point mass at 0 (area={pi_zero:.3f})",
         )
 
@@ -725,7 +726,7 @@ def plot_feature_level_kde_with_hist_preagg(
 
     ax2 = ax1.twinx()
     if np.isfinite(pi_zero):
-        ax2.vlines(0, 0, pi_zero, linestyles="--")
+        ax2.vlines(0, 0, pi_zero, linestyles="--", colors="red")
     ax2.set_ylabel("P(X=0)")
 
     plt.tight_layout()
