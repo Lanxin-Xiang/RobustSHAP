@@ -27,4 +27,11 @@ Thumbs.db
 # Project-specific
 archive/
 shap_results/
-# figures/
+figures/
+
+# files
+simulation_*.ipynb
+
+# data
+# data/*
+# !data/.gitkeep

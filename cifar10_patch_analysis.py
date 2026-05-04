@@ -32,8 +32,8 @@ CIFAR10_CLASSES = [
     "airplane", "automobile", "bird", "cat", "deer",
     "dog", "frog", "horse", "ship", "truck",
 ]
-PATCH_GRID = (8, 8)
-RUNS_DIR = Path(__file__).parent / "shap_results" / "bootstrap_runs 2"
+PATCH_GRID = (24, 24)
+RUNS_DIR = Path(__file__).parent / "shap_results" / "bootstrap_runs_vit_base"
 
 
 # ─── 1. Load data ──────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ def load_bootstrap_runs(runs_dir: Path = RUNS_DIR):
 
     for run_dir in run_dirs:
         sr = run_dir / "shap_results"
-        shap = np.load(sr / "patch_shap.npy")          # (100, 8, 8)
+        shap = np.load(sr / "patch_shap.npy")          # (100, 24, 24)
         n_images = shap.shape[0]
         n_patches = PATCH_GRID[0] * PATCH_GRID[1]
         flat = shap.reshape(n_images, n_patches)        # (100, 64)
@@ -137,9 +137,24 @@ def get_image_patch_stats(dist_df, image_idx):
     return median_shap, sd_shap, snr, kde_models, img_df
 
 
-def _upsample_patch_map(arr_8x8, scale=4):
-    """Nearest-neighbour upsample (8,8) → (32,32)."""
-    return np.kron(arr_8x8, np.ones((scale, scale)))
+def _upsample_patch_map(arr, img_size=None):
+    """Nearest-neighbour upsample patch map to match image spatial size.
+
+    If img_size is None, defaults to scale=1 (no upsampling).
+    img_size can be an int (square) or (H, W) tuple.
+    """
+    ph, pw = arr.shape
+    if img_size is None:
+        return arr
+    if isinstance(img_size, int):
+        ih, iw = img_size, img_size
+    else:
+        ih, iw = img_size
+    scale_h = ih // ph
+    scale_w = iw // pw
+    if scale_h < 1 or scale_w < 1:
+        return arr
+    return np.kron(arr, np.ones((scale_h, scale_w)))
 
 
 # ─── 4. Visualization ─────────────────────────────────────────────────────────
@@ -150,8 +165,8 @@ def plot_image_explanation(
     images,
     labels,
     predicted,
-    top_k=6,
-    figsize=(20, 9),
+    top_k=10,
+    figsize=(15, 9),
 ):
     """Comprehensive per-image explanation panel.
 
@@ -163,8 +178,8 @@ def plot_image_explanation(
       [2] SHAP std-dev heatmap          (shows variability across runs)
       [3] |Median|²/Std heatmap         (shows attribution confidence)
 
-    Bottom row (top_k panels):
-      KDE distribution for top-k patches ranked by |median SHAP|.
+    Bottom row (1 panel):
+      Ridgeline KDE for top-k patches ranked by |median SHAP|.
     """
     median_shap, sd_shap, snr, kde_models, img_df = get_image_patch_stats(dist_df, image_idx)
 
@@ -172,96 +187,136 @@ def plot_image_explanation(
     pred_cls = CIFAR10_CLASSES[predicted[image_idx]]
     match    = "✓" if labels[image_idx] == predicted[image_idx] else "✗"
 
-    n_cols = max(4, top_k)
     fig = plt.figure(figsize=figsize)
     fig.suptitle(
-        f"Image {image_idx}  |  True: {true_cls}  |  Predicted: {pred_cls} {match}",
-        fontsize=13, fontweight="bold",
+        # f"Image {image_idx}  |  True: {true_cls}  |  Predicted: {pred_cls} {match}",
+        f"True: {true_cls}  |  Predicted: {pred_cls} {match}",
+        fontsize=20, fontweight="bold", y=1,
     )
+    # gs = fig.add_gridspec(
+    #     2, 4,
+    #     height_ratios=[1.4, 0.8],
+    #     hspace=0.35, wspace=0.30,
+    #     top=0.93, bottom=0.05,
+    # )
     gs = fig.add_gridspec(
-        2, n_cols,
-        height_ratios=[1.3, 1.0],
-        hspace=0.45, wspace=0.30,
+        1, 4,
+        wspace=0.30,
+        top=0.93, bottom=0.05,
     )
 
     # ── Panel 0: original image ───────────────────────────────────────────────
     ax0 = fig.add_subplot(gs[0, 0])
     ax0.imshow(images[image_idx])
-    ax0.set_title("Original Image", fontsize=10)
+    ax0.set_title("Original Image", fontsize=16)
     ax0.axis("off")
 
     # ── Panel 1: median SHAP overlaid on image ────────────────────────────────
     ax1 = fig.add_subplot(gs[0, 1])
-    median_up = _upsample_patch_map(median_shap)
+    img_h, img_w = images[image_idx].shape[:2]
+    median_up = _upsample_patch_map(median_shap, img_size=(img_h, img_w))
     vabs = max(np.abs(median_shap).max(), 1e-12)
     norm = TwoSlopeNorm(vcenter=0, vmin=-vabs, vmax=vabs)
     ax1.imshow(images[image_idx], alpha=0.45)
     im1 = ax1.imshow(median_up, cmap="RdBu_r", norm=norm, alpha=0.6)
     plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-    # patch grid lines
+    # patch grid lines — spacing in image pixels
+    step_h = img_h / PATCH_GRID[0]
+    step_w = img_w / PATCH_GRID[1]
     for i in range(1, PATCH_GRID[0]):
-        ax1.axhline(i * 4 - 0.5, color="white", lw=0.4, alpha=0.5)
-        ax1.axvline(i * 4 - 0.5, color="white", lw=0.4, alpha=0.5)
-    ax1.set_title("Median SHAP per Patch\n(red=+ toward pred class)", fontsize=10)
+        ax1.axhline(i * step_h - 0.5, color="white", lw=0.4, alpha=0.5)
+        ax1.axvline(i * step_w - 0.5, color="white", lw=0.4, alpha=0.5)
+    # ax1.set_title("Median SHAP per Patch\n(red=+ toward pred class)", fontsize=16)
+    ax1.set_title("Median SHAP per Patch", fontsize=15, pad=12)
     ax1.axis("off")
 
     # ── Panel 2: std-dev heatmap ───────────────────────────────────────────────
     ax2 = fig.add_subplot(gs[0, 2])
     im2 = ax2.imshow(sd_shap, cmap="YlOrRd", interpolation="nearest")
     plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-    ax2.set_title("SHAP Std Dev\n(variability across 50 runs)", fontsize=10)
+    # ax2.set_title("SHAP Std Dev\n(variability across runs)", fontsize=16)
+    ax2.set_title("SHAP Std Dev", fontsize=15, pad=12)
     _style_patch_ax(ax2)
 
     # ── Panel 3: SNR heatmap ───────────────────────────────────────────────────
     ax3 = fig.add_subplot(gs[0, 3])
     im3 = ax3.imshow(snr, cmap="Greens", interpolation="nearest")
     plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-    # ax3.set_title("|Median SHAP|² / Std Dev\n(attribution confidence)", fontsize=10)
-    ax3.set_title("Robust SHAP", fontsize=10)
+    ax3.set_title("RoSHAP", fontsize=15, pad=12)
     _style_patch_ax(ax3)
 
-    # ── Bottom row: top-k KDE distributions ───────────────────────────────────
-    abs_median = img_df["nonzero_median"].abs().values
-    top_order  = np.argsort(abs_median)[::-1][:top_k]
+    # ── Bottom row: ridgeline KDE for top-k patches ────────────────────────────
+    # abs_median = img_df["nonzero_median"].abs().values
+    # top_order  = np.argsort(abs_median)[::-1][:top_k]
 
-    for plot_pos, patch_flat_idx in enumerate(top_order):
-        ax = fig.add_subplot(gs[1, plot_pos])
-        model      = kde_models[patch_flat_idx]
-        median_val = img_df["nonzero_median"].iloc[patch_flat_idx]
-        sd_val     = img_df["sd_estimated"].iloc[patch_flat_idx]
-        row, col   = divmod(int(img_df["feature"].iloc[patch_flat_idx]), PATCH_GRID[1])
+    # # global x range — use raw data bounds (nonzero_min/max) across top patches,
+    # # then clip to percentiles to avoid outlier patches dominating the x axis
+    # x_vals = []
+    # for patch_flat_idx in top_order:
+    #     model = kde_models[patch_flat_idx]
+    #     if model is not None and model.get("kde") is not None:
+    #         x_vals += [model["nonzero_min"], model["nonzero_max"]]
+    # if x_vals:
+    #     x_arr = np.array(x_vals)
+    #     x_min = np.nanpercentile(x_arr, 0.1)
+    #     x_max = np.nanpercentile(x_arr, 99.9)
+    #     # small tail pad so KDE curves don't get clipped at the edge
+    #     pad = np.mean([kde_models[p]["bandwidth"] for p in top_order
+    #                    if kde_models[p] is not None and kde_models[p].get("kde") is not None])
+    #     x_min -= 3 * pad
+    #     x_max += 3 * pad
+    # else:
+    #     x_min, x_max = -1e-6, 1e-6
+    # x_grid = np.linspace(x_min, x_max, 500)
 
-        color = "tomato" if median_val >= 0 else "steelblue"
+    # spacing = 0.50
+    # ridge_scale = 0.40
 
-        if model is not None and model.get("kde") is not None:
-            lo = model["nonzero_min"] - 4 * model["bandwidth"]
-            hi = model["nonzero_max"] + 4 * model["bandwidth"]
-            x_grid = np.linspace(lo, hi, 400)
-            y_pdf  = zero_inflated_kde_pdf(x_grid, model)
-            ax.plot(x_grid, y_pdf, color=color, lw=1.8)
-            ax.fill_between(x_grid, y_pdf, alpha=0.18, color=color)
+    # ax_r = fig.add_subplot(gs[1, :])
+    # ax_r.set_facecolor("#EBEBEB")
+    # ax_r.set_axisbelow(True)
+    # ax_r.grid(axis="x", color="white", linewidth=1.0, zorder=0)
 
-        ax.set_title(
-            f"Patch ({row}, {col})\nmed={median_val:.2e}, σ={sd_val:.2e}",
-            fontsize=8,
-        )
-        ax.set_xlabel("SHAP value", fontsize=7)
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_edgecolor(color)
-            spine.set_linewidth(1.5)
-        ax.tick_params(axis="x", labelsize=6)
+    # patch_labels = []
+    # for plot_pos, patch_flat_idx in enumerate(top_order):
+    #     model     = kde_models[patch_flat_idx]
+    #     row, col  = divmod(int(img_df["feature"].iloc[patch_flat_idx]), PATCH_GRID[1])
+    #     patch_labels.append(f"({row},{col})")
+    #     y_base = (top_k - 1 - plot_pos) * spacing
 
-    # Hide unused bottom-row axes
-    for i in range(top_k, n_cols):
-        fig.add_subplot(gs[1, i]).set_visible(False)
+    #     if model is not None and model.get("kde") is not None:
+    #         y_pdf = zero_inflated_kde_pdf(x_grid, model)
+    #         peak  = y_pdf.max()
+    #         dens  = (y_pdf / peak * ridge_scale) if peak > 0 else np.zeros_like(x_grid)
+    #     else:
+    #         dens = np.zeros_like(x_grid)
+
+    #     ax_r.fill_between(
+    #         x_grid, y_base, y_base + dens,
+    #         facecolor="lightgray", edgecolor="black", linewidth=0.7,
+    #         alpha=1.0, zorder=10 + plot_pos,
+    #     )
+    #     ax_r.plot(x_grid, y_base + dens, color="black", linewidth=0.7, zorder=11 + plot_pos)
+    #     ax_r.hlines(y_base, x_min, x_max, color="black", linewidth=0.4, zorder=12 + plot_pos)
+
+    # ax_r.set_yticks([(top_k - 1 - i) * spacing for i in range(top_k)])
+    # ax_r.set_yticklabels(patch_labels, fontsize=8)
+    # ax_r.set_xlabel("SHAP value", fontsize=10)
+    # ax_r.set_xlim(x_min, x_max)
+    # ax_r.set_ylim(-0.12, (top_k - 1) * spacing + ridge_scale + 0.12)
+    # for spine in ax_r.spines.values():
+    #     spine.set_visible(False)
+    # ax_r.tick_params(axis="x", labelsize=8, length=0)
+    # ax_r.tick_params(axis="y", labelsize=8, length=0)
+    # ax_r.axvline(0, color="#888888", linewidth=0.8, linestyle="--", zorder=5)
 
     return fig
 
 
 def _style_patch_ax(ax):
-    ax.set_xticks(range(PATCH_GRID[1]))
-    ax.set_yticks(range(PATCH_GRID[0]))
+    ph, pw = PATCH_GRID
+    ax.set_xticks(range(0, pw, max(1, pw // 8)))
+    ax.set_yticks(range(0, ph, max(1, ph // 8)))
     ax.tick_params(labelsize=6)
 
 
@@ -294,11 +349,12 @@ def plot_patch_importance_summary(dist_df, labels, predicted, n_images=20, figsi
 
     ax.set_yticks(range(len(row_labels)))
     ax.set_yticklabels(row_labels, fontsize=8)
-    ax.set_xlabel(f"Patch index (0–{n_patches-1}, row-major in 8×8 grid)")
+    ph, pw = PATCH_GRID
+    ax.set_xlabel(f"Patch index (0–{n_patches-1}, row-major in {ph}×{pw} grid)")
     ax.set_title(f"Per-patch Median SHAP across {len(image_ids)} images")
 
-    # thin column separators at 8-patch boundaries
-    for x in range(8, n_patches, 8):
+    # thin column separators every pw patches (one per row boundary)
+    for x in range(pw, n_patches, pw):
         ax.axvline(x - 0.5, color="white", lw=0.6, alpha=0.6)
 
     plt.tight_layout()

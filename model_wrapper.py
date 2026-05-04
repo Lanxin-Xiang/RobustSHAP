@@ -102,8 +102,16 @@ class SklearnWrapper(ModelWrapper):
         
     def fit(self, X_train, y_train):
         """Train sklearn model."""
-        self.model = self.model_class(**self.model_params)
-        self.model.fit(X_train, y_train)
+        params = self.model_params.copy()
+        class_weight = params.pop('class_weight', None)
+        self.model = self.model_class(**params)
+
+        fit_kwargs = {}
+        if class_weight is not None:
+            from sklearn.utils.class_weight import compute_sample_weight
+            fit_kwargs['sample_weight'] = compute_sample_weight(class_weight, y_train)
+
+        self.model.fit(X_train, y_train, **fit_kwargs)
         
         # Store training data for explainer creation
         if self.use_linear_explainer:
@@ -288,26 +296,36 @@ class CatBoostWrapper(ModelWrapper):
         self.num_boost_round = num_boost_round
         self.model = None
         
+    _REGRESSION_METRICS = {
+        'rmse', 'mae', 'mape', 'r2', 'msle', 'huber',
+        'quantile', 'poisson', 'smape', 'medianabsoluteerror',
+    }
+
+    def _is_regression(self):
+        metric = self.params.get('eval_metric', '')
+        loss   = self.params.get('loss_function', '')
+        return (
+            str(metric).lower() in self._REGRESSION_METRICS
+            or str(loss).lower() in self._REGRESSION_METRICS
+        )
+
     def fit(self, X_train, y_train):
-        """Train CatBoost model."""
+        """Train CatBoost model (Regressor or Classifier based on eval_metric)."""
         try:
-            from catboost import CatBoostClassifier, Pool
+            from catboost import CatBoostClassifier, CatBoostRegressor, Pool
         except ImportError:
             raise ImportError("CatBoost not installed. Install with: pip install catboost")
-        
+
         skip = {'iterations', 'verbose', 'seed', 'random_state'}
         params = {k: v for k, v in self.params.items() if k not in skip}
-        # normalise random seed to CatBoost's expected kwarg
         seed_val = self.params.get('random_seed',
                    self.params.get('seed',
                    self.params.get('random_state')))
         if seed_val is not None:
             params['random_seed'] = seed_val
-        self.model = CatBoostClassifier(
-            iterations=self.num_boost_round,
-            verbose=False,
-            **params
-        )
+
+        cls = CatBoostRegressor if self._is_regression() else CatBoostClassifier
+        self.model = cls(iterations=self.num_boost_round, verbose=False, **params)
         self.model.fit(X_train, y_train)
         return self
     
