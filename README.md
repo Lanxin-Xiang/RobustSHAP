@@ -4,8 +4,7 @@ Robust SHAP experiments and notebooks.
 
 ## Project Files
 
-- `golub_kernel.ipynb` is the script for the Golub data set.
-- `simulation_simple.ipynb` is the simulation script.
+- `golub_feature_selection.ipynb` is the script for the Golub data set.
 
 ## Environment Setup (Conda)
 
