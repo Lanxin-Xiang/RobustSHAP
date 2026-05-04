@@ -28,6 +28,7 @@ Thumbs.db
 archive/
 shap_results/
 figures/
+data/
 
 # files
 simulation_*.ipynb
