@@ -1,10 +1,13 @@
 # RobustSHAP
 
-Robust SHAP experiments and notebooks.
+This repository contains code for reproducing the experiments in the submitted paper. Robust SHAP experiments and notebooks. 
+
 
 ## Project Files
 
 - `golub_feature_selection.ipynb` is the script for the Golub data set.
+
+- `uji_feature_selection_comparison.ipynb` is the script for the UJIIndoorLoc data set.
 
 ## Environment Setup (Conda)
 
