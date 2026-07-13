@@ -10,6 +10,8 @@ out-of-bag samples each time, and modelling each feature's attribution
 distribution across resamples — then ranks features by how *consistently* they
 matter, not just how much they matter once.
 
+The original paper experiments and notebooks live in [research/](research/).
+
 ## Install
 
 ```bash
