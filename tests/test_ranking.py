@@ -34,7 +34,7 @@ def test_rank_features_ordering(feature_stats):
     ranked = rank_features(feature_stats, k=2)
     assert ranked["feature"].tolist() == ["a", "b"]
     assert ranked.index.tolist() == [1, 2]
-    assert "importance" in ranked.columns
+    assert "RoSHAP" in ranked.columns
 
 
 def test_rank_features_class_filter():
@@ -50,7 +50,7 @@ def test_rank_features_class_filter():
     assert per_class["feature"].tolist() == ["a", "b"]
     averaged = rank_features(df)  # mean across classes: a=(1+64)/2=32.5, b=(16+4)/2=10
     assert averaged["feature"].tolist() == ["a", "b"]
-    assert averaged["importance"].iloc[0] == pytest.approx(32.5)
+    assert averaged["RoSHAP"].iloc[0] == pytest.approx(32.5)
 
 
 def test_missing_columns_raise():

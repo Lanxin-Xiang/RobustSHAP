@@ -64,8 +64,8 @@ def rank_features(feature_stats, k=None, by="roshap_stat", class_id=None):
     Returns
     -------
     pd.DataFrame
-        Sorted descending by *by*, with a 1-based "Rank" index and an
-        ``importance`` column equal to the ranking statistic.
+        Sorted descending by *by*, with a 1-based "Rank" index and a
+        ``RoSHAP`` column equal to the ranking statistic.
     """
     df = feature_stats
     if by not in df.columns:
@@ -89,5 +89,5 @@ def rank_features(feature_stats, k=None, by="roshap_stat", class_id=None):
         top = top.head(k)
     top.index = pd.RangeIndex(1, len(top) + 1, name="Rank")
     top = top.copy()
-    top["importance"] = top[by]
+    top["RoSHAP"] = top[by]
     return top

@@ -30,7 +30,7 @@ def main():
     )
 
     print("\nTop 10 features by RoSHAP stat:")
-    print(result.top_features(k=10)[["feature", "importance", "SNR", "p_nonzero"]].round(3))
+    print(result.top_features(k=10)[["feature", "RoSHAP", "SNR", "p_nonzero"]].round(3))
 
     fig = result.plot_ridge(top_k=10, show=False)
     fig.savefig("ridge.png", dpi=150)

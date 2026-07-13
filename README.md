@@ -53,7 +53,7 @@ result = roshap.explain(
     n_jobs=-1,
 )
 
-result.top_features(k=15)       # DataFrame: feature, importance, SNR, p_nonzero, ...
+result.top_features(k=15)       # DataFrame: feature, RoSHAP, SNR, p_nonzero, ...
 result.plot_ridge(top_k=15)     # ridge plot of attribution distributions
 result.plot_top_features(top_k=15)          # bar chart with error bars
 result.plot_feature("my_feature")           # one feature's fitted density + histogram
