@@ -48,5 +48,8 @@ Homepage = "https://github.com/Lanxin-Xiang/RobustSHAP"
 Repository = "https://github.com/Lanxin-Xiang/RobustSHAP"
 Issues = "https://github.com/Lanxin-Xiang/RobustSHAP/issues"
 
+[tool.hatch.build.targets.sdist]
+exclude = ["research", ".github"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
