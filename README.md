@@ -14,6 +14,16 @@ The original paper experiments and notebooks live in [research/](research/).
 
 ## Install
 
+Installing into a fresh virtual environment is recommended (any tool works
+— venv, conda, uv):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+# or: conda create -n roshap python=3.12 && conda activate roshap
+```
+
+Then:
+
 ```bash
 pip install git+https://github.com/Lanxin-Xiang/RobustSHAP.git
 ```
