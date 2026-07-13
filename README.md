@@ -15,27 +15,41 @@ The original paper experiments and notebooks live in [research/](research/).
 ## Install
 
 ```bash
-pip install roshap
+pip install git+https://github.com/Lanxin-Xiang/RobustSHAP.git
 ```
 
-The core install supports XGBoost (default), plus any scikit-learn model.
-Optional extras:
+(A PyPI release is coming; once it is live, plain `pip install roshap` will
+work too.)
 
-| Extra | Enables |
+This installs everything needed to run roshap with its default model
+(XGBoost) or any scikit-learn estimator — including numpy, pandas, shap, and
+xgboost themselves.
+
+### Optional model backends
+
+LightGBM, CatBoost, PyTorch, and Keras/TensorFlow are **not** installed by
+default. To use one of them as the model inside the bootstrap, add the
+matching extra in square brackets:
+
+```bash
+pip install "roshap[lightgbm] @ git+https://github.com/Lanxin-Xiang/RobustSHAP.git"
+```
+
+| Extra | Adds support for |
 |---|---|
-| `roshap[lightgbm]` | LightGBM models |
-| `roshap[catboost]` | CatBoost models |
-| `roshap[torch]` | PyTorch models (Deep/Gradient SHAP) |
-| `roshap[tensorflow]` | Keras/TensorFlow models |
-| `roshap[smote]` | SMOTE oversampling inside each bootstrap |
-| `roshap[all]` | everything above |
+| `lightgbm` | LightGBM models |
+| `catboost` | CatBoost models |
+| `torch` | PyTorch models (Deep/Gradient SHAP) |
+| `tensorflow` | Keras/TensorFlow models |
+| `smote` | SMOTE oversampling inside each bootstrap |
+| `all` | all of the above |
 
-Development install:
+### Developing roshap itself
 
 ```bash
 git clone https://github.com/Lanxin-Xiang/RobustSHAP.git && cd RobustSHAP
 pip install -e ".[dev]"
-pytest
+pytest   # 60 tests, ~2 s
 ```
 
 ## Quickstart
