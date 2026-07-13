@@ -31,7 +31,7 @@ Optional extras:
 Development install:
 
 ```bash
-git clone <repo-url> && cd roshap
+git clone https://github.com/Lanxin-Xiang/RobustSHAP.git && cd RobustSHAP
 pip install -e ".[dev]"
 pytest
 ```

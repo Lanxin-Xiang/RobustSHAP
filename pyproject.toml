@@ -44,7 +44,9 @@ all = ["roshap[lightgbm,catboost,torch,tensorflow,smote]"]
 dev = ["pytest>=7.0", "build>=1.0"]
 
 [project.urls]
-Homepage = "https://github.com/lanxinxiang/roshap"
+Homepage = "https://github.com/Lanxin-Xiang/RobustSHAP"
+Repository = "https://github.com/Lanxin-Xiang/RobustSHAP"
+Issues = "https://github.com/Lanxin-Xiang/RobustSHAP/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
